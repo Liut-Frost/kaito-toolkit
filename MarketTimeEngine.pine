@@ -1,0 +1,36 @@
+//@version=6
+indicator("Kaito Toolkit - Market Time Engine", overlay = true)
+
+//=====================================================
+// Kaito Toolkit
+// Module: Market Time Engine
+// Responsibility:
+// Provides New York time information to all modules.
+//=====================================================
+//=====================================================
+// State Variables
+//=====================================================
+var float currentDayHigh = na
+var float currentDayLow = na
+//=====================================================
+// Detect New Trading Day
+//=====================================================
+newDay = ta.change(time("D")) != 0
+if newDay
+    currentDayHigh := high
+    currentDayLow := low
+//=====================================================
+// Initialization
+//=====================================================
+if na(currentDayHigh)
+    currentDayHigh := high
+    currentDayLow := low
+    //=====================================================
+// Update Current Day
+//=====================================================
+if high > currentDayHigh
+    currentDayHigh := high
+if low < currentDayLow
+    currentDayLow := low
+plot(currentDayHigh, color=color.green, linewidth=2)
+plot(currentDayLow, color=color.red, linewidth=2)

@@ -1,36 +1,144 @@
 //@version=6
-indicator("Kaito Toolkit - Market Time Engine", overlay = true)
+indicator("Kaito Toolkit - Module 01 : Time Engine", overlay = true, max_lines_count = 500, max_labels_count = 500)
 
 //=====================================================
-// Kaito Toolkit
-// Module: Market Time Engine
-// Responsibility:
-// Provides New York time information to all modules.
+// KAITO TOOLKIT
+// MODULE 01 : TIME ENGINE
 //=====================================================
+//
+// Responsibilities
+// • Detect New York calendar events
+// • Draw trading day separators
+// • Display day labels
+// • Display month labels
+//
 //=====================================================
-// State Variables
+
+
 //=====================================================
-var float currentDayHigh = na
-var float currentDayLow = na
+// VISIBILITY SETTINGS
 //=====================================================
-// Detect New Trading Day
+
+showTimeEngine = input.bool(true, "Enable", group="01. Time Engine")
+
+showMonths = input.bool(true, "Months", group="01. Time Engine")
+
+showWeeks = input.bool(true, "Weeks", group="01. Time Engine")
+
+showDays = input.bool(true, "Days", group="01. Time Engine")
+
+showSessions = input.bool(true, "Sessions", group="01. Time Engine")
+
+
 //=====================================================
-newDay = ta.change(time("D")) != 0
-if newDay
-    currentDayHigh := high
-    currentDayLow := low
+// NEW YORK CALENDAR
 //=====================================================
-// Initialization
+
+nyDay       = dayofmonth(time, "America/New_York")
+nyPrevDay   = dayofmonth(time[1], "America/New_York")
+
+nyWeekDay   = dayofweek(time, "America/New_York")
+
+nyMonth     = month(time, "America/New_York")
+nyPrevMonth = month(time[1], "America/New_York")
+
+nyYear      = year(time, "America/New_York")
+
+
 //=====================================================
-if na(currentDayHigh)
-    currentDayHigh := high
-    currentDayLow := low
-    //=====================================================
-// Update Current Day
+// CALENDAR EVENTS
 //=====================================================
-if high > currentDayHigh
-    currentDayHigh := high
-if low < currentDayLow
-    currentDayLow := low
-plot(currentDayHigh, color=color.green, linewidth=2)
-plot(currentDayLow, color=color.red, linewidth=2)
+
+isNewDay   = nyDay != nyPrevDay
+isNewMonth = nyMonth != nyPrevMonth
+
+isTradingDay =
+     nyWeekDay >= dayofweek.monday and
+     nyWeekDay <= dayofweek.friday
+
+
+//=====================================================
+// DAY NAME
+//=====================================================
+
+string dayName =
+     nyWeekDay == dayofweek.monday    ? "Mon" :
+     nyWeekDay == dayofweek.tuesday   ? "Tue" :
+     nyWeekDay == dayofweek.wednesday ? "Wed" :
+     nyWeekDay == dayofweek.thursday  ? "Thu" :
+     nyWeekDay == dayofweek.friday    ? "Fri" :
+     ""
+
+
+//=====================================================
+// MONTH NAME
+//=====================================================
+
+string monthName =
+     nyMonth == 1  ? "Jan" :
+     nyMonth == 2  ? "Feb" :
+     nyMonth == 3  ? "Mar" :
+     nyMonth == 4  ? "Apr" :
+     nyMonth == 5  ? "May" :
+     nyMonth == 6  ? "Jun" :
+     nyMonth == 7  ? "Jul" :
+     nyMonth == 8  ? "Aug" :
+     nyMonth == 9  ? "Sep" :
+     nyMonth == 10 ? "Oct" :
+     nyMonth == 11 ? "Nov" :
+     "Dec"
+
+
+//=====================================================
+// APPEARANCE
+//=====================================================
+
+lineColor =
+     nyWeekDay == dayofweek.monday ?
+     color.blue :
+     color.red
+
+lineWidth =
+     nyWeekDay == dayofweek.monday ?
+     2 :
+     1
+
+
+//=====================================================
+// DRAW DAY SEPARATORS
+//=====================================================
+
+if showTimeEngine and showDays and isNewDay and isTradingDay
+
+    line.new(
+         x1 = bar_index,
+         y1 = low - 100000,
+         x2 = bar_index,
+         y2 = high + 100000,
+         xloc = xloc.bar_index,
+         extend = extend.none,
+         color = lineColor,
+         width = lineWidth)
+
+    label.new(
+         x = bar_index,
+         y = high + (high - low) * 2,
+         text = dayName,
+         style = label.style_none,
+         textcolor = lineColor,
+         size = size.normal)
+
+
+//=====================================================
+// DRAW MONTH LABEL
+//=====================================================
+
+if showTimeEngine and showMonths and isNewMonth
+
+    label.new(
+         x = bar_index,
+         y = high + (high - low) * 4,
+         text = monthName + " " + str.tostring(nyYear),
+         style = label.style_none,
+         textcolor = color.yellow,
+         size = size.large)

@@ -31,6 +31,16 @@ showSessions = input.bool(true, "Sessions", group="01. Time Engine")
 
 
 //=====================================================
+//=====================================================
+// MODULE 09 : DISPLAY
+//=====================================================
+
+annotationLength = input.int(
+     defval = 20,
+     title = "Annotation Length",
+     minval = 5,
+     maxval = 500,
+     group = "09. Display")
 // NEW YORK CALENDAR
 //=====================================================
 
@@ -115,7 +125,7 @@ if showTimeEngine and showDays and isNewDay and isTradingDay
          y1 = low - 100000,
          x2 = bar_index,
          y2 = high + 100000,
-         xloc = xloc.bar_index,
+         xloc = xloc.bar_time,
          extend = extend.none,
          color = lineColor,
          width = lineWidth)
@@ -142,3 +152,160 @@ if showTimeEngine and showMonths and isNewMonth
          style = label.style_none,
          textcolor = color.yellow,
          size = size.large)
+         //=====================================================
+// MODULE 02 : DAILY RANGE ENGINE
+//=====================================================
+//
+// Responsibility
+// • Track Current Day High/Low
+// • Archive Previous Day High/Low
+//
+// Dependencies
+// • Module 01 : Time Engine
+//   Requires:
+//      isNewDay
+//
+//=====================================================
+
+//=====================================================
+// STATE VARIABLES
+//=====================================================
+
+var float currentDayHigh = na
+var float currentDayLow  = na
+
+var float previousDayHigh = na
+var float previousDayLow  = na
+
+// Origin bars
+var int currentDayHighTime = na
+var int currentDayLowTime  = na
+
+var int previousDayHighTime = na
+var int previousDayLowTime  = na
+//=====================================================
+//=====================================================
+// MODULE 02.1 : LIQUIDITY OBJECT STORAGE
+//=====================================================
+
+// Prices
+var array<float> liquidityPrices = array.new_float()
+
+// Origin Time
+var array<int> liquidityTimes = array.new_int()
+
+// Direction
+// 1 = High
+// -1 = Low
+var array<int> liquidityType = array.new_int()
+
+// Active
+var array<bool> liquidityActive = array.new_bool()
+
+// Line IDs
+var array<line> liquidityLines = array.new_line()
+// INITIALIZATION
+//=====================================================
+
+if na(currentDayHigh)
+    currentDayHigh := high
+    currentDayLow := low
+
+    currentDayHighTime := time
+    currentDayLowTime := time
+
+//=====================================================
+// NEW TRADING DAY
+//=====================================================
+
+if isNewDay
+
+    // Archive completed trading day
+    previousDayHigh := currentDayHigh
+    previousDayLow := currentDayLow
+
+    previousDayHighTime := currentDayHighTime
+    previousDayLowTime := currentDayLowTime
+
+    // Start new trading day
+    currentDayHigh := high
+    currentDayLow := low
+
+    currentDayHighTime := time
+    currentDayLowTime := time
+//=====================================================
+// UPDATE CURRENT DAY
+//=====================================================
+
+// New High
+if high > currentDayHigh
+    currentDayHigh := high
+    currentDayHighTime := time
+
+// New Low
+if low < currentDayLow
+    currentDayLow := low
+    currentDayLowTime := time
+//=====================================================
+// MODULE 02.1 : DAILY LIQUIDITY RENDERER
+//=====================================================
+//
+// Responsibility
+// • Draw PDH
+// • Draw PDL
+//
+// Dependencies
+// • previousDayHigh
+// • previousDayLow
+//=====================================================
+
+//=====================================================
+// VISIBILITY
+//=====================================================
+
+showDailyRange = input.bool(true, "Enable", group="02. Daily Range")
+showPDH = input.bool(true, "PDH", group="02. Daily Range")
+showPDL = input.bool(true, "PDL", group="02. Daily Range")
+
+//=====================================================
+// OBJECTS
+//=====================================================
+
+var line pdhRay = na
+var line pdlRay = na
+
+//=====================================================
+// CREATE NEW RAYS
+//=====================================================
+
+if isNewDay
+
+    if not na(pdhRay)
+        line.delete(pdhRay)
+
+    if not na(pdlRay)
+        line.delete(pdlRay)
+
+    if showDailyRange and showPDH and not na(previousDayHigh)
+
+        pdhRay := line.new(
+     x1 = previousDayHighTime,
+     y1 = previousDayHigh,
+     x2 = previousDayHighTime + (annotationLength * timeframe.in_seconds() * 1000),
+     y2 = previousDayHigh,
+     xloc = xloc.bar_time,
+     extend = extend.none,
+     color = color.green,
+     width = 2)
+
+    if showDailyRange and showPDL and not na(previousDayLow)
+
+        pdlRay := line.new(
+     x1 = previousDayLowTime,
+     y1 = previousDayLow,
+     x2 = previousDayLowTime + (annotationLength * timeframe.in_seconds() * 1000),
+     y2 = previousDayLow,
+     xloc = xloc.bar_time,
+     extend = extend.none,
+     color = color.red,
+     width = 2)

@@ -1,0 +1,94 @@
+// MODULE 02 : DAILY RANGE ENGINE
+//=====================================================
+//
+// Responsibility
+// • Track Current Day High/Low
+// • Archive Previous Day High/Low
+//
+// Dependencies
+// • Module 01 : Time Engine
+//   Requires:
+//      isNewDay
+//
+//=====================================================
+
+//=====================================================
+// STATE VARIABLES
+//=====================================================
+
+var float currentDayHigh = na
+var float currentDayLow  = na
+
+var float previousDayHigh = na
+var float previousDayLow  = na
+
+// Origin bars
+var int currentDayHighTime = na
+var int currentDayLowTime  = na
+
+var int previousDayHighTime = na
+var int previousDayLowTime  = na
+//=====================================================
+//=====================================================
+// MODULE 02.1 : LIQUIDITY OBJECT STORAGE
+//=====================================================
+
+// Prices
+var array<float> liquidityPrices = array.new_float()
+
+// Origin Time
+var array<int> liquidityTimes = array.new_int()
+
+// Direction
+// 1 = High
+// -1 = Low
+var array<int> liquidityType = array.new_int()
+
+// Active
+var array<bool> liquidityActive = array.new_bool()
+
+// Line IDs
+var array<line> liquidityLines = array.new_line()
+// INITIALIZATION
+//=====================================================
+
+if na(currentDayHigh)
+    currentDayHigh := high
+    currentDayLow := low
+
+    currentDayHighTime := time
+    currentDayLowTime := time
+
+//=====================================================
+// NEW TRADING DAY
+//=====================================================
+
+if isNewDay
+
+    // Archive completed trading day
+    previousDayHigh := currentDayHigh
+    previousDayLow := currentDayLow
+
+    previousDayHighTime := currentDayHighTime
+    previousDayLowTime := currentDayLowTime
+
+    // Start new trading day
+    currentDayHigh := high
+    currentDayLow := low
+
+    currentDayHighTime := time
+    currentDayLowTime := time
+//=====================================================
+// UPDATE CURRENT DAY
+//=====================================================
+
+// New High
+if high > currentDayHigh
+    currentDayHigh := high
+    currentDayHighTime := time
+
+// New Low
+if low < currentDayLow
+    currentDayLow := low
+    currentDayLowTime := time
+//=====================================================

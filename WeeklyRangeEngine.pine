@@ -1,0 +1,52 @@
+=====================================================
+MODULE 03 : WEEKLY ENGINE
+=====================================================
+
+STATE VARIABLES
+
+INITIALIZATION
+
+NEW TRADING WEEK
+
+UPDATE CURRENT WEEK
+
+EXPORTS
+var float currentWeekHigh = na
+var float currentWeekLow  = na
+
+var float previousWeekHigh = na
+var float previousWeekLow  = na
+
+var int currentWeekHighBar = na
+var int currentWeekLowBar  = na
+
+var int previousWeekHighBar = na
+var int previousWeekLowBar  = na
+if na(currentWeekHigh)
+    currentWeekHigh := high
+    currentWeekLow := low
+
+    currentWeekHighBar := bar_index
+    currentWeekLowBar := bar_index
+    if isNewWeek
+
+    // Archive completed week
+    previousWeekHigh := currentWeekHigh
+    previousWeekLow := currentWeekLow
+
+    previousWeekHighBar := currentWeekHighBar
+    previousWeekLowBar := currentWeekLowBar
+
+    // Start new week
+    currentWeekHigh := high
+    currentWeekLow := low
+
+    currentWeekHighBar := bar_index
+    currentWeekLowBar := bar_index
+    if high > currentWeekHigh
+    currentWeekHigh := high
+    currentWeekHighBar := bar_index
+
+if low < currentWeekLow
+    currentWeekLow := low
+    currentWeekLowBar := bar_index

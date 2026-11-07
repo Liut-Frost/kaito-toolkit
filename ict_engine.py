@@ -74,6 +74,8 @@ class OrderBlock:
     mitigated_index: Optional[int] = None
     invalidated: bool = False
     invalidated_index: Optional[int] = None
+    is_trap: bool = False                  # Domain 2 invalidation: sits directly on relative equal highs/lows
+    trap_reason: str = ""
 
     # --- Rapid-CISD refinement fields (confirmed spec update) ---
     is_rapid: bool = False                 # run was 1-2 candles -- FVG requirement doesn't apply
@@ -81,10 +83,6 @@ class OrderBlock:
     pending_confirmation: bool = False     # rapid run with no FVG/iFVG -- awaiting Domain 4/5, not confirmed invalid
     cisd_event: Optional["CISDEvent"] = None  # backref, needed for the alternate entry rule (CISD candle's open)
     alt_entry_price: Optional[float] = None   # rapid+no-FVG path: limit entry at the CONFIRMING candle's open
-    # (distinct from the OB candle's own open/reference_open) -- SL for
-    # this path must sit beyond the structural liquidity sweep high/low,
-    # not tightly below/above the OB candle itself, per the confirmed
-    # spec. That level isn't computable yet -- needs Domain 5 (Liquidity).
 
     @property
     def mean_threshold(self) -> float:
@@ -92,21 +90,20 @@ class OrderBlock:
         return (self.high + self.low) / 2
 
     @property
+    def proximal_edge(self) -> float:
+        """Proximal edge: high for bullish OB (buy zone top), low for bearish OB (sell zone bottom)."""
+        return self.high if self.direction == "bullish" else self.low
+
+    @property
     def valid(self) -> bool:
         """
-        Mechanically valid per what's currently checkable. Three outcomes:
-        - Invalidated (50% breach) -> always False.
-        - Non-rapid run with no FVG -> False (hard disqualifier per spec).
-        - Rapid run with no FVG and no iFVG -> False for now, but this is
-          a PENDING state, not a confirmed rejection -- check
-          `pending_confirmation` before treating this as a dead setup.
-          HTF context and the equal-high/low trap check aren't wired in
-          yet (Domain 4/5), so a `True` here means "valid on the checks
-          we can currently make," not "fully validated per the complete
-          spec." Always cross-check `htf_context_checked` before trusting
-          this in production logic.
+        Mechanically valid per what's currently checkable.
+        - Invalidated (50% Mean Threshold breach) -> False
+        - Trap liquidity (sits on equal highs/lows) -> False
+        - Non-rapid run with no FVG -> False (hard disqualifier per Domain 2 spec)
+        - Rapid run with no FVG and no iFVG -> False (check pending_confirmation)
         """
-        if self.invalidated:
+        if self.invalidated or self.is_trap:
             return False
         if self.fvg_checked and self.fvg is None and self.ifvg is None:
             return False
@@ -149,6 +146,75 @@ class LiquiditySweep:
     time: pd.Timestamp
     level_swept: float
     direction: Direction   # "bearish" sweep = swept a high (liquidity above), reversal down expected
+
+
+@dataclass
+class HTFPDArray:
+    """
+    Domain 4 spec: HTF PD array with tap quality tracking.
+
+    Primary matrix: 4H and Daily FVGs
+    Secondary: HTF Order Blocks + iFVGs (not yet implemented)
+
+    - Valid tap: wick to proximal edge
+    - High-quality tap: 50% CE (Consequent Encroachment)
+    - Invalidation: body close through distal (far) edge
+    """
+    array_type: Literal["fvg", "order_block", "ifvg"]
+    timeframe: str  # "4h", "daily"
+    direction: Direction
+    top: float
+    bottom: float
+    proximal_edge: float  # high for bullish, low for bearish
+    distal_edge: float    # low for bullish, high for bearish
+    ce_50: float          # 50% Consequent Encroachment
+    valid: bool = True
+    tapped: bool = False
+    tap_quality: Optional[Literal["wick", "ce_50"]] = None
+    invalidated: bool = False
+
+    @classmethod
+    def from_fvg(cls, fvg: "FVG", timeframe: str) -> "HTFPDArray":
+        """Create HTF PD array from an FVG."""
+        proximal = fvg.bottom if fvg.direction == "bullish" else fvg.top
+        distal = fvg.top if fvg.direction == "bullish" else fvg.bottom
+        ce_50 = (fvg.top + fvg.bottom) / 2
+        return cls(
+            array_type="fvg", timeframe=timeframe, direction=fvg.direction,
+            top=fvg.top, bottom=fvg.bottom,
+            proximal_edge=proximal, distal_edge=distal, ce_50=ce_50,
+        )
+
+    def check_tap(self, candle_high: float, candle_low: float, candle_close: float) -> None:
+        """Updates tap state and checks for invalidation per Domain 4 spec."""
+        if self.invalidated:
+            return
+
+        # Check for tap (wick into the zone)
+        if candle_low <= self.top and candle_high >= self.bottom:
+            if not self.tapped:
+                self.tapped = True
+                # Determine tap quality
+                if self.direction == "bullish":
+                    if candle_low <= self.ce_50:
+                        self.tap_quality = "ce_50"
+                    elif candle_low <= self.proximal_edge:
+                        self.tap_quality = "wick"
+                else:  # bearish
+                    if candle_high >= self.ce_50:
+                        self.tap_quality = "ce_50"
+                    elif candle_high >= self.proximal_edge:
+                        self.tap_quality = "wick"
+
+        # Check for invalidation (body close through distal edge)
+        if self.direction == "bullish":
+            if candle_close < self.distal_edge:
+                self.invalidated = True
+                self.valid = False
+        else:  # bearish
+            if candle_close > self.distal_edge:
+                self.invalidated = True
+                self.valid = False
 
 
 @dataclass
@@ -298,6 +364,68 @@ def mark_filled_fvgs(fvgs: list[FVG], df: pd.DataFrame) -> None:
             if fvg.direction == "bearish" and price >= fvg.top:
                 fvg.filled = True
                 break
+
+
+# ---------------------------------------------------------------------------
+# Domain 3: Displacement Quality (Run-Level Analysis)
+# ---------------------------------------------------------------------------
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Computes the current ATR(period) from the end of the dataframe."""
+    if len(df) < period + 1:
+        return 0.0
+    highs = df["high"].values
+    lows = df["low"].values
+    closes = df["close"].values
+    tr = np.maximum(highs[1:] - lows[1:],
+                    np.maximum(np.abs(highs[1:] - closes[:-1]),
+                              np.abs(lows[1:] - closes[:-1])))
+    if len(tr) < period:
+        return float(np.mean(tr)) if len(tr) > 0 else 0.0
+    return float(np.mean(tr[-period:]))
+
+
+def check_run_displacement_quality(df: pd.DataFrame, start_idx: int, end_idx: int,
+                                   direction: Direction, fvgs: list[FVG], atr: float) -> tuple[bool, str]:
+    """
+    Domain 3 Spec: Judge displacement at the run level.
+    Treat consecutive same-direction candles as one macro institutional candle.
+
+    Requirements:
+    1. Net body (first open to last close) >= 70% of total range
+    2. Total range >= 1.5 * ATR(14) (volatility expansion)
+    3. Must leave an FVG in the breaking leg
+
+    For isolated displacement candles: if the run contains a single outsized candle
+    that creates an FVG, handle per Domain 3 isolated-displacement exception (already
+    implemented in _check_isolated_displacement).
+    """
+    first_open = df["open"].iloc[start_idx]
+    last_close = df["close"].iloc[end_idx]
+    run_high = df["high"].iloc[start_idx:end_idx + 1].max()
+    run_low = df["low"].iloc[start_idx:end_idx + 1].min()
+    total_range = run_high - run_low
+
+    if total_range == 0:
+        return False, "Zero range run"
+
+    net_body = abs(last_close - first_open)
+    body_ratio = net_body / total_range
+
+    # 1. Net Body Ratio >= 70%
+    if body_ratio < 0.70:
+        return False, f"Low body ratio: {body_ratio:.2%} < 70%"
+
+    # 2. Volatility Expansion >= 1.5x ATR
+    if atr > 0 and total_range < 1.5 * atr:
+        return False, f"Insufficient expansion: {total_range:.5f} < 1.5*ATR ({1.5*atr:.5f})"
+
+    # 3. FVG Requirement
+    has_fvg = any(f.direction == direction and start_idx <= f.start_index <= end_idx for f in fvgs)
+    if not has_fvg:
+        return False, "No FVG left in the displacement leg"
+
+    return True, f"Displacement quality confirmed (body {body_ratio:.1%}, range {total_range/atr:.1f}x ATR)"
 
 
 # ---------------------------------------------------------------------------
@@ -537,19 +665,44 @@ def compute_structural_sl(df: pd.DataFrame, swings: list[Swing], ob: OrderBlock,
 
 
 def detect_liquidity_sweep(df: pd.DataFrame, level: float, direction: Direction,
-                            start_index: int) -> Optional[LiquiditySweep]:
+                            start_index: int, atr_multiplier: float = 0.1,
+                            atr_period: int = 14) -> Optional[LiquiditySweep]:
     """
-    A sweep = price wicks beyond `level` then closes back on the other side
-    (classic "turtle soup" signature).
+    Domain 5 sweep filter:
+    - Wick penetration >= 0.1 * ATR (volatility-scaled minimum to filter noise)
+    - Candle body closes back inside within 2 candles (5min TF)
+
+    BOS (sustained expansion): if body closes beyond and HOLDS past the 2-candle
+    window, it's intentional expansion (BOS), not a sweep/rejection.
     """
+    atr = calculate_atr(df, period=atr_period)
+    if atr == 0:
+        return None
+
+    min_penetration = atr_multiplier * atr
+    highs = df["high"].values
+    lows = df["low"].values
+    closes = df["close"].values
+
     for i in range(start_index, len(df)):
-        h, l, c = df["high"].iloc[i], df["low"].iloc[i], df["close"].iloc[i]
+        h, l, c = highs[i], lows[i], closes[i]
+
         if direction == "bearish":  # sweeping a high
-            if h > level and c < level:
-                return LiquiditySweep(index=i, time=df.index[i], level_swept=level, direction=direction)
+            penetration = h - level
+            if penetration >= min_penetration:
+                # Check 2-candle rejection window
+                for j in range(i, min(i + 3, len(df))):
+                    if closes[j] < level:
+                        return LiquiditySweep(index=i, time=df.index[i], level_swept=level, direction=direction)
+                # If body held beyond after 2 candles, it's a BOS expansion, not a sweep
+
         else:  # sweeping a low
-            if l < level and c > level:
-                return LiquiditySweep(index=i, time=df.index[i], level_swept=level, direction=direction)
+            penetration = level - l
+            if penetration >= min_penetration:
+                for j in range(i, min(i + 3, len(df))):
+                    if closes[j] > level:
+                        return LiquiditySweep(index=i, time=df.index[i], level_swept=level, direction=direction)
+
     return None
 
 
@@ -887,28 +1040,22 @@ def _find_inversion_fvg(df: pd.DataFrame, fvgs: list[FVG], event: CISDEvent,
 
 
 def identify_order_blocks_from_cisd(df: pd.DataFrame, cisd_events: list[CISDEvent],
-                                     fvgs: list[FVG]) -> list[OrderBlock]:
+                                     fvgs: list[FVG], swings: Optional[list[Swing]] = None,
+                                     equal_tolerance_pips: float = 0.0005) -> list[OrderBlock]:
     """
     Builds and validates Order Blocks per the Domain 2 spec: the OB candle
     is always the run's first candle (the CISD reference candle) from the
     leg that just got broken -- not the largest-range candle, not the
     last candle before the flip.
 
-    Validation implemented now:
-    - Non-rapid runs (3+ candles): the FVG requirement, as before.
-    - Rapid runs (1-2 candles): the FVG requirement is replaced per the
-      confirmed refinement. Checked now: Inversion FVG (an older, opposite
-      -direction gap the confirming candle closed all the way through).
-      NOT yet checked: HTF PD-array tap and clean liquidity sweep (both
-      need Domain 4/5) -- a rapid CISD with no FVG and no iFVG is left as
-      `pending_confirmation=True`, not hard-invalidated, since those two
-      paths might still confirm it once built.
+    Validation implemented:
+    - Non-rapid runs (3+ candles): the FVG requirement.
+    - Rapid runs (1-2 candles): Inversion FVG or pending confirmation.
 
-    Invalidation implemented now: 50% Mean Threshold breach (a later
-    candle body-closing past the OB candle's midpoint) and prior
-    mitigation (price already tapped the zone and left before the most
-    recent test). Both are evaluated by scanning forward from the OB's
-    creation to the end of `df`.
+    Invalidation implemented:
+    - 50% Mean Threshold breach (subsequent body closes past midpoint).
+    - Trap Liquidity: OB sitting directly on/under clean equal highs/lows.
+    - Prior mitigation: already tapped and departed.
     """
     highs = df["high"].values
     lows = df["low"].values
@@ -926,6 +1073,25 @@ def identify_order_blocks_from_cisd(df: pd.DataFrame, cisd_events: list[CISDEven
         run_length = event.run_end_index - event.run_start_index + 1
         is_rapid = run_length <= 2
 
+        # --- Domain 2 Invalidation Rule 2: "Trap" Liquidity ---
+        is_trap = False
+        trap_reason = ""
+        if swings:
+            eq_clusters = detect_equal_levels(swings, tolerance_pips=equal_tolerance_pips)
+            for c in eq_clusters:
+                if ob_direction == "bullish" and c["kind"] == "low":
+                    diff = ob_low - c["price"]
+                    if -equal_tolerance_pips <= diff <= (equal_tolerance_pips * 3):
+                        is_trap = True
+                        trap_reason = f"Bullish OB sits on equal lows @ {c['price']:.5f} (trap liquidity)"
+                        break
+                elif ob_direction == "bearish" and c["kind"] == "high":
+                    diff = c["price"] - ob_high
+                    if -equal_tolerance_pips <= diff <= (equal_tolerance_pips * 3):
+                        is_trap = True
+                        trap_reason = f"Bearish OB sits under equal highs @ {c['price']:.5f} (trap liquidity)"
+                        break
+
         # --- FVG requirement: must exist within the displacement leg
         # (run_start_index -> confirming candle), on the OB's own direction
         fvg = None
@@ -940,15 +1106,13 @@ def identify_order_blocks_from_cisd(df: pd.DataFrame, cisd_events: list[CISDEven
             opposite = "bearish" if ob_direction == "bullish" else "bullish"
             ifvg = _find_inversion_fvg(df, fvgs, event, opposite)
             if ifvg is None:
-                # neither displacement FVG nor iFVG -- HTF tap / liquidity
-                # sweep (Domain 4/5) might still validate this; not a
-                # confirmed rejection yet.
                 pending_confirmation = True
 
         ob = OrderBlock(
             index=ob_index, time=df.index[ob_index], high=ob_high, low=ob_low,
             direction=ob_direction, fvg=fvg, fvg_checked=True,
             htf_context_checked=False,
+            is_trap=is_trap, trap_reason=trap_reason,
             is_rapid=is_rapid, ifvg=ifvg, pending_confirmation=pending_confirmation,
             cisd_event=event,
             alt_entry_price=(df["open"].iloc[event.index] if is_rapid and fvg is None else None),
@@ -978,6 +1142,30 @@ def identify_order_blocks_from_cisd(df: pd.DataFrame, cisd_events: list[CISDEven
 # ---------------------------------------------------------------------------
 # Higher-Timeframe PD-Array Validation (Domain 4)
 # ---------------------------------------------------------------------------
+
+def build_htf_pd_matrix(h4_fvgs: list[FVG], daily_fvgs: list[FVG]) -> list[HTFPDArray]:
+    """
+    Domain 4: Constructs the HTF PD array matrix.
+
+    Primary matrix: 4H and Daily FVGs
+    Secondary: HTF Order Blocks + iFVGs (to be added)
+
+    Excludes: breakers, volume imbalances (per your spec)
+    """
+    matrix = []
+
+    # Primary: 4H FVGs
+    for fvg in h4_fvgs:
+        if not fvg.filled:
+            matrix.append(HTFPDArray.from_fvg(fvg, "4h"))
+
+    # Primary: Daily FVGs
+    for fvg in daily_fvgs:
+        if not fvg.filled:
+            matrix.append(HTFPDArray.from_fvg(fvg, "daily"))
+
+    return matrix
+
 
 def validate_ob_htf_context(ob: OrderBlock, htf_fvgs: list[FVG],
                             htf_dealing_range: Optional[DealingRange],

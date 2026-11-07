@@ -198,14 +198,19 @@ def fractal_descend(
         trail.append("M15: no CISD delivery flip confirmed yet after the sweep -- no setup yet")
         return SignalResult(symbol, False, None, trail)
 
-    # Identify order blocks from CISD flips (Domain 2 spec)
-    obs = ict.identify_order_blocks_from_cisd(m15_df, post_sweep_events, m15_fvgs)
+    # Identify order blocks from CISD flips (Domain 2 spec), including trap liquidity checks
+    obs = ict.identify_order_blocks_from_cisd(m15_df, post_sweep_events, m15_fvgs, swings=m15_swings)
 
     # Filter for OBs that align with daily bias and are currently valid
     qualifying_obs = [
         ob for ob in obs
         if ob.direction == daily_bias and ob.valid and not ob.mitigated
     ]
+
+    # Log any trap invalidations for transparency
+    trap_obs = [ob for ob in obs if ob.direction == daily_bias and ob.is_trap]
+    for tob in trap_obs:
+        trail.append(f"Domain 2 trap filter: {tob.trap_reason} -- setup disqualified")
 
     if not qualifying_obs:
         trail.append(f"M15: CISD occurred but no fresh, unmitigated {daily_bias} Order Block found")
